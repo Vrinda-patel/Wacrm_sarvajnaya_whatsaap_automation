@@ -203,7 +203,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
 
         const error = result.error;
-        console.error("[AuthProvider] fetchProfile error:", {
+        console.warn("[AuthProvider] fetchProfile error:", {
           message: error.message,
           details: error.details,
           hint: error.hint,
@@ -243,7 +243,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             .eq("id", data.account_id)
             .maybeSingle();
           if (accountErr) {
-            console.error("[AuthProvider] fetchAccount error:", {
+            console.warn("[AuthProvider] fetchAccount error:", {
               message: accountErr.message,
               details: accountErr.details,
               hint: accountErr.hint,

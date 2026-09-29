@@ -78,8 +78,12 @@ export async function middleware(request: NextRequest) {
   }
 
   // API routes that need auth (not webhooks)
-  if (!user && request.nextUrl.pathname.startsWith('/api/whatsapp/') &&
-      !request.nextUrl.pathname.includes('/webhook')) {
+    // API routes that need auth (not webhooks, and not bot-reply, which
+  // is protected by its own shared secret instead of a browser session)
+  const path = request.nextUrl.pathname
+  if (!user && path.startsWith('/api/whatsapp/') &&
+      !path.includes('/webhook') &&
+      !path.startsWith('/api/whatsapp/bot-reply')) {
     return withRefreshedCookies(
       NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     )

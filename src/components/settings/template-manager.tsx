@@ -204,7 +204,7 @@ export function TemplateManager() {
       if (error) throw error;
       setTemplates(data || []);
     } catch (err) {
-      console.error('Failed to fetch templates:', err);
+      console.warn('Failed to fetch templates:', err);
       toast.error(t('toastLoadFailed'));
     } finally {
       setLoading(false);

@@ -421,16 +421,16 @@ async function handleStatusUpdate(status: {
   const failure =
     status.status === 'failed' && status.errors?.[0]
       ? {
-          code: status.errors[0].code,
-          title: status.errors[0].title,
-          details: status.errors[0].error_data?.details ?? null,
-        }
+        code: status.errors[0].code,
+        title: status.errors[0].title,
+        details: status.errors[0].error_data?.details ?? null,
+      }
       : null
 
   if (failure) {
     console.warn(
       `WhatsApp message ${status.id} failed: [${failure.code}] ${failure.title}` +
-        (failure.details ? ` — ${failure.details}` : '')
+      (failure.details ? ` — ${failure.details}` : '')
     )
   }
 
@@ -884,16 +884,16 @@ async function processMessage(
     message:
       interactiveReplyId
         ? {
-            kind: 'interactive_reply',
-            reply_id: interactiveReplyId,
-            reply_title: contentText ?? '',
-            meta_message_id: message.id,
-          }
+          kind: 'interactive_reply',
+          reply_id: interactiveReplyId,
+          reply_title: contentText ?? '',
+          meta_message_id: message.id,
+        }
         : {
-            kind: 'text',
-            text: contentText ?? message.text?.body ?? '',
-            meta_message_id: message.id,
-          },
+          kind: 'text',
+          text: contentText ?? message.text?.body ?? '',
+          meta_message_id: message.id,
+        },
     isFirstInboundMessage,
   })
   const flowConsumed = flowResult.consumed
@@ -953,7 +953,27 @@ async function processMessage(
       },
     }).catch((err) => console.error('[automations] dispatch failed:', err))
   }
-
+  // Forward to n8n AI workflow — Gemini agent with custom intent routing.
+  if (!flowConsumed && !interactiveReplyId && inboundText.trim()) {
+    try {
+      await fetch('https://n8n.srv1964800.hstgr.cloud/webhook/whatsapp-inbound', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          from: identity.phone,
+          wa_user_id: identity.waUserId ?? null,
+          message: inboundText,
+          contact_name: contactRecord.name,
+          contact_id: contactRecord.id,
+          conversation_id: conversation.id,
+          account_id: accountId,
+          message_id: message.id,
+        }),
+      })
+    } catch (err) {
+      console.error('[webhook] failed to forward message to n8n:', err)
+    }
+  }
   // AI auto-reply. Runs only for plain-text inbound the deterministic
   // flow runner did NOT consume (flows win over the LLM), and only when
   // the account has enabled it. Awaited inside `after()` (same reason as

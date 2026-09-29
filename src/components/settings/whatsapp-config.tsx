@@ -134,10 +134,12 @@ export function WhatsAppConfig() {
   const [registrationProbe, setRegistrationProbe] =
     useState<RegistrationProbe | null>(null);
 
-  const webhookUrl =
-    typeof window !== 'undefined'
-      ? `${window.location.origin}/api/whatsapp/webhook`
-      : '';
+  // const webhookUrl =
+  //   typeof window !== 'undefined'
+  //     ? `${window.location.origin}/api/whatsapp/webhook`
+  //     : '';
+
+  const webhookUrl = `${process.env.NEXT_PUBLIC_SITE_URL}/api/whatsapp/webhook`;
 
   const fetchConfig = useCallback(async (acctId: string) => {
     setLoading(true);
@@ -298,6 +300,7 @@ export function WhatsAppConfig() {
       if (tokenEdited && accessToken !== MASKED_TOKEN && accessToken.trim()) {
         payload.access_token = accessToken.trim();
       } else if (config) {
+        
         // Existing config — reuse stored encrypted token by decrypting on the
         // server. But our POST handler requires an access_token to verify
         // with Meta. If the user didn't change the token, we need to signal

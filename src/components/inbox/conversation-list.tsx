@@ -104,7 +104,7 @@ export function ConversationList({
 
       if (error) {
         // Supabase errors have non-enumerable properties — log fields explicitly
-        console.error("Failed to fetch conversations:", {
+        console.warn("Failed to fetch conversations:", {
           message: error.message,
           details: error.details,
           hint: error.hint,

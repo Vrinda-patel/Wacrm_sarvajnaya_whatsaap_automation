@@ -79,7 +79,7 @@ export default function PipelinesPage() {
       .select("*")
       .order("created_at");
     if (error) {
-      console.error("Failed to load pipelines:", error.message);
+      console.warn("Failed to load pipelines:", error.message);
       return [];
     }
     return data ?? [];
