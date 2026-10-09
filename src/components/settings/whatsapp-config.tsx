@@ -479,6 +479,289 @@ export function WhatsAppConfig() {
     toast.success(t('webhookCopied'));
   }
 
+  // ---- Meta Embedded Signup (coexistence) -------------------------------------
+  //
+  // This handler:
+  //  1. Loads the Meta Facebook JS SDK from connect.facebook.net.
+  //  2. Calls FB.login() with coexistence extras so Meta's popup opens the
+  //     "keep using WhatsApp Business App" flow (not the migration flow).
+  //  3. Listens for WA_EMBEDDED_SIGNUP messages posted back by the popup.
+  //  4. On FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING (or FINISH) it posts the
+  //     short-lived code + session data to our server-side route.
+  //  5. The server exchanges the code for a token, subscribes the WABA,
+  //     encrypts the token, and saves it — the browser never sees secrets.
+  //
+  // The Meta App ID and Configuration ID are safe to expose in the browser
+  // (they're public identifiers, not secrets).
+  const [embeddedSignupLoading, setEmbeddedSignupLoading] = useState(false);
+
+  function handleEmbeddedSignup() {
+    const appId = process.env.NEXT_PUBLIC_META_APP_ID;
+    const configId = process.env.NEXT_PUBLIC_META_CONFIGURATION_ID;
+
+    if (!appId || !configId) {
+      toast.error(
+        'NEXT_PUBLIC_META_APP_ID (or META_APP_ID) and NEXT_PUBLIC_META_CONFIGURATION_ID must be set in your environment to use this feature.',
+        { duration: 8000 },
+      );
+      return;
+    }
+
+    setEmbeddedSignupLoading(true);
+
+    // Track state to safely coordinate between the WA_EMBEDDED_SIGNUP postMessage
+    // and the FB.login callback (which deliver session data and auth code asynchronously).
+    let capturedCode: string | null = null;
+    let capturedSession: {
+      phone_number_id: string;
+      waba_id: string;
+      business_id?: string;
+      event_type: string;
+    } | null = null;
+    let isSubmitting = false;
+
+    // Cleanup helper — removes listeners and resets loading state
+    let cleanupMessageListener: (() => void) | null = null;
+    const done = () => {
+      if (cleanupMessageListener) {
+        cleanupMessageListener();
+        cleanupMessageListener = null;
+      }
+      setEmbeddedSignupLoading(false);
+    };
+
+    // Submits the authorization code + session details to the server
+    const submitToServer = (
+      code: string,
+      session: {
+        phone_number_id: string;
+        waba_id: string;
+        business_id?: string;
+        event_type: string;
+      },
+    ) => {
+      if (isSubmitting) return;
+      isSubmitting = true;
+
+      toast.loading('Connecting WhatsApp Business App to Meta Cloud API…', {
+        id: 'embedded-signup',
+      });
+
+      fetch('/api/whatsapp/embedded-signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code,
+          phone_number_id: session.phone_number_id,
+          waba_id: session.waba_id,
+          business_id: session.business_id || undefined,
+          event_type: session.event_type,
+        }),
+      })
+        .then((res) => res.json())
+        .then(async (result) => {
+          toast.dismiss('embedded-signup');
+          if (result.success) {
+            const label = result.is_on_biz_app
+              ? `✅ Connected in coexistence mode (${result.display_phone_number ?? session.phone_number_id}). Your WhatsApp Business mobile app and CRM are both active.`
+              : `✅ Connected (${result.display_phone_number ?? session.phone_number_id}).`;
+            toast.success(label, { duration: 12000 });
+            if (accountId) await fetchConfig(accountId);
+          } else {
+            toast.error(result.error ?? 'Onboarding failed. Check server logs.', {
+              duration: 10000,
+            });
+          }
+        })
+        .catch((err) => {
+          toast.dismiss('embedded-signup');
+          console.error('[embedded-signup] fetch error:', err);
+          toast.error('Network error contacting the server. Please try again.');
+        })
+        .finally(done);
+    };
+
+    const trySubmit = () => {
+      if (capturedCode && capturedSession) {
+        submitToServer(capturedCode, capturedSession);
+      }
+    };
+
+    // ---- Step 1: load the Meta SDK (idempotent) --------------------------------
+    const loadSdk = (): Promise<void> =>
+      new Promise((resolve) => {
+        if (typeof window === 'undefined') return resolve();
+        if ((window as Window & { FB?: { init?: unknown } }).FB) return resolve();
+
+        const script = document.createElement('script');
+        script.src = 'https://connect.facebook.net/en_US/sdk.js';
+        script.async = true;
+        script.defer = true;
+        script.onload = () => resolve();
+        script.onerror = () => resolve();
+        document.body.appendChild(script);
+      });
+
+    loadSdk()
+      .then(() => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const FB = (window as any).FB;
+        if (!FB) {
+          toast.error('Could not load the Meta Facebook SDK. Check your network and CSP settings.');
+          done();
+          return;
+        }
+
+        FB.init({ appId, cookie: true, xfbml: false, version: 'v21.0' });
+
+        // ---- Step 2: listen for WA_EMBEDDED_SIGNUP messages -------------------
+        const onMessage = (event: MessageEvent) => {
+          // Accept messages from facebook.com and web.facebook.com
+          if (!event.origin.endsWith('facebook.com')) return;
+
+          let data: { type?: string; event?: string; data?: Record<string, unknown> };
+          try {
+            data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+          } catch {
+            return;
+          }
+
+          if (data?.type !== 'WA_EMBEDDED_SIGNUP') return;
+
+          const eventType = data.event;
+
+          if (
+            eventType === 'FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING' ||
+            eventType === 'FINISH' ||
+            eventType === 'FINISH_GRANT_ONLY_API_ACCESS'
+          ) {
+            const session = (data.data as Record<string, unknown>) ?? {};
+            const phone_number_id = String(session.phone_number_id ?? '');
+            const waba_id = String(session.waba_id ?? '');
+            const business_id = String(session.business_id ?? '');
+
+            // In some configurations, code is also reflected in the message data
+            const msgCode = String(session.code ?? '');
+            if (msgCode && !capturedCode) {
+              capturedCode = msgCode;
+            }
+
+            if (!phone_number_id || !waba_id) {
+              console.warn('[embedded-signup] Missing phone_number_id or waba_id in FINISH event:', session);
+              toast.error(
+                'Onboarding completed but Meta did not return phone_number_id or waba_id. Ensure your Configuration ID has WhatsApp permissions enabled.',
+              );
+              done();
+              return;
+            }
+
+            capturedSession = {
+              phone_number_id,
+              waba_id,
+              business_id: business_id || undefined,
+              event_type: eventType,
+            };
+
+            // Also check FB.getAuthResponse() as immediate fallback
+            if (!capturedCode) {
+              try {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                const existingAuth = (window as any).FB?.getAuthResponse?.();
+                if (existingAuth?.code) {
+                  capturedCode = existingAuth.code;
+                }
+              } catch {
+                // ignore
+              }
+            }
+
+            if (capturedCode) {
+              trySubmit();
+            } else {
+              // Wait briefly for the FB.login callback to deliver response.authResponse.code
+              toast.loading('Finalizing WhatsApp authorization…', {
+                id: 'embedded-signup-waiting',
+              });
+            }
+          } else if (eventType === 'CANCEL') {
+            toast.dismiss('embedded-signup-waiting');
+            toast.info('WhatsApp Business App connection cancelled.');
+            done();
+          } else if (eventType === 'ERROR') {
+            toast.dismiss('embedded-signup-waiting');
+            const errMsg = String(
+              (data.data as Record<string, unknown>)?.error_message ?? 'Meta onboarding error',
+            );
+            toast.error(`Meta Embedded Signup error: ${errMsg}`, { duration: 8000 });
+            done();
+          }
+        };
+
+        window.addEventListener('message', onMessage);
+        cleanupMessageListener = () => window.removeEventListener('message', onMessage);
+
+        // Safety timeout: automatically reset loading state after 5 minutes if inactive
+        const timeoutId = setTimeout(() => {
+          if (!isSubmitting) {
+            toast.dismiss('embedded-signup-waiting');
+            done();
+          }
+        }, 300000);
+
+        const originalDone = done;
+        // Ensure timer is cleared on completion
+        cleanupMessageListener = () => {
+          clearTimeout(timeoutId);
+          window.removeEventListener('message', onMessage);
+        };
+
+        // ---- Step 3: launch the Meta Embedded Signup popup --------------------
+        //
+        // Parameters compliant with Meta WhatsApp Embedded Signup v4 Coexistence:
+        //   config_id            : numeric Configuration ID from App Dashboard
+        //   response_type        : 'code' — server-side exchange for long-lived token
+        //   override_default_response_type: true — forces code response
+        //   extras.version       : 'v4'
+        //   extras.featureType   : 'whatsapp_business_app_onboarding' — triggers coexistence flow
+        //   extras.feature       : 'whatsapp_business_app_onboarding' — backward compatibility
+        //   extras.sessionInfoVersion: '3' — provides phone_number_id and waba_id
+        FB.login(
+          (response: { status: string; authResponse?: { code?: string } }) => {
+            toast.dismiss('embedded-signup-waiting');
+
+            const code = response.authResponse?.code;
+            if (code && !capturedCode) {
+              capturedCode = code;
+            }
+
+            if (response.status === 'connected' && capturedCode) {
+              // If session was already received via postMessage, trigger submit now
+              trySubmit();
+            } else if (response.status !== 'connected' && !capturedSession) {
+              // User closed the popup window without completing
+              done();
+            }
+          },
+          {
+            config_id: configId,
+            response_type: 'code',
+            override_default_response_type: true,
+            extras: {
+              version: 'v4',
+              featureType: 'whatsapp_business_app_onboarding',
+              feature: 'whatsapp_business_app_onboarding',
+              sessionInfoVersion: '3',
+            },
+          },
+        );
+      })
+      .catch((err) => {
+        console.error('[embedded-signup] SDK load error:', err);
+        toast.error('Failed to load the Meta SDK.');
+        done();
+      });
+  }
+
   if (loading) {
     return (
       <section className="animate-in fade-in-50 duration-200">
@@ -727,6 +1010,72 @@ export function WhatsAppConfig() {
             )}
           </Alert>
         )}
+
+        {/* ---- Coexistence: Connect WhatsApp Business App ---- */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-foreground">Connect WhatsApp Business App</CardTitle>
+            <CardDescription className="text-muted-foreground">
+              Use Meta Embedded Signup to connect your existing WhatsApp Business App number
+              to this CRM without disrupting staff who reply from their phones.
+              Your number will work in both places simultaneously (coexistence mode).
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Coexistence status badge — shown when onboarded via this flow */}
+            {config?.onboarding_mode === 'embedded_signup_coexistence' && (
+              <div className="flex items-center gap-2 rounded-md border border-emerald-700/50 bg-emerald-950/30 px-3 py-2 text-sm">
+                <CheckCircle2 className="size-4 shrink-0 text-emerald-400" />
+                <span className="text-emerald-200">
+                  Coexistence active
+                  {config.display_phone_number ? ` · ${config.display_phone_number}` : ''}
+                  {config.is_on_biz_app ? ' · WhatsApp Business App confirmed' : ''}
+                </span>
+              </div>
+            )}
+
+            <div className="space-y-2 text-sm text-muted-foreground">
+              <p>What this does:</p>
+              <ul className="ml-4 list-disc space-y-1">
+                <li>Keeps your existing number on the WhatsApp Business App on your phone.</li>
+                <li>Connects the same number to the Cloud API so this CRM can send and receive messages.</li>
+                <li>Staff can keep replying from the mobile WhatsApp Business App.</li>
+                <li>
+                  CRM bot messages and staff mobile replies both appear in this inbox
+                  (mobile replies are echoed automatically).
+                </li>
+              </ul>
+            </div>
+
+            {canEditSettings && (
+              <Button
+                onClick={handleEmbeddedSignup}
+                disabled={embeddedSignupLoading}
+                className="bg-[#1877F2] hover:bg-[#166FE5] text-white"
+              >
+                {embeddedSignupLoading ? (
+                  <>
+                    <Loader2 className="size-4 animate-spin" />
+                    Connecting…
+                  </>
+                ) : (
+                  <>
+                    <ExternalLink className="size-4" />
+                    Connect WhatsApp Business App
+                  </>
+                )}
+              </Button>
+            )}
+
+            <p className="text-xs text-muted-foreground">
+              Requires{' '}
+              <code className="rounded bg-muted px-1 py-0.5 text-xs">NEXT_PUBLIC_META_APP_ID</code>{' '}
+              and{' '}
+              <code className="rounded bg-muted px-1 py-0.5 text-xs">NEXT_PUBLIC_META_CONFIGURATION_ID</code>{' '}
+              to be set in your environment.
+            </p>
+          </CardContent>
+        </Card>
 
         {/* API Credentials */}
         <Card>

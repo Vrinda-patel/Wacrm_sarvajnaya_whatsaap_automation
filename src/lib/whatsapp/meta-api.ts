@@ -11,7 +11,10 @@
 
 import { isBusinessScopedUserId } from './wa-identity'
 
-const META_API_VERSION = 'v21.0'
+// Allow overriding the API version via env so we can bump it without
+// a code change.  Defaults to the version the project was validated
+// against; update after smoke-testing against a newer version.
+const META_API_VERSION = process.env.META_API_VERSION || 'v21.0'
 const META_API_BASE = `https://graph.facebook.com/${META_API_VERSION}`
 
 export interface MetaSendResult {
@@ -23,6 +26,13 @@ export interface MetaPhoneInfo {
   display_phone_number: string
   verified_name?: string
   quality_rating?: string
+  /** Whether coexistence is active for this number (Cloud API + Business App). */
+  is_on_biz_app?: boolean
+  /**
+   * Meta's platform classification for the number.
+   * Observed values: "CLOUD_API", "SMB", "ON_PREMISE".
+   */
+  platform_type?: string
 }
 
 interface MetaErrorResponse {
@@ -1222,4 +1232,155 @@ export async function downloadMedia(
     response.headers.get('content-type') || 'application/octet-stream'
   const buffer = Buffer.from(await response.arrayBuffer())
   return { buffer, contentType }
+}
+
+// ============================================================
+// Embedded Signup — OAuth code exchange (server-side only)
+// ============================================================
+//
+// These functions must NEVER be called from a browser / client
+// component.  They consume META_APP_SECRET which is a server-only
+// environment variable.
+
+export interface ExchangeOAuthCodeArgs {
+  /** Short-lived code returned by the Meta Embedded Signup SDK. */
+  code: string
+  /**
+   * Must match the redirect_uri registered in the Meta App Dashboard
+   * or be omitted if the app uses none.
+   */
+  redirectUri?: string
+}
+
+export interface ExchangeOAuthCodeResult {
+  /** Long-lived user access token (or system user token if configured). */
+  accessToken: string
+  /** Token type — usually "bearer". */
+  tokenType: string
+}
+
+/**
+ * Exchange the short-lived authorization code returned by Meta Embedded
+ * Signup for a long-lived access token.
+ *
+ * This call MUST happen on the server.  The response contains the raw
+ * access token; the caller is responsible for encrypting it before
+ * storing it.
+ *
+ * Reference:
+ *   https://developers.facebook.com/docs/facebook-login/guides/access-tokens
+ */
+export async function exchangeOAuthCodeForToken(
+  args: ExchangeOAuthCodeArgs,
+): Promise<ExchangeOAuthCodeResult> {
+  const { code, redirectUri } = args
+
+  const appId = process.env.META_APP_ID || process.env.NEXT_PUBLIC_META_APP_ID
+  const appSecret = process.env.META_APP_SECRET
+
+  if (!appId || !appSecret) {
+    throw new Error(
+      '[meta-api] META_APP_ID and META_APP_SECRET must be set to exchange an OAuth code.',
+    )
+  }
+
+  // META_APP_SECRET may contain multiple comma-separated secrets when the
+  // operator runs several Meta Apps (see webhook-signature.ts).  For the
+  // OAuth exchange we need the secret of THIS app — by convention the first
+  // secret in the list belongs to the primary app.
+  const primarySecret = appSecret.split(',')[0].trim()
+
+  const params = new URLSearchParams({
+    client_id: appId,
+    client_secret: primarySecret,
+    code,
+  })
+  if (redirectUri !== undefined) params.set('redirect_uri', redirectUri)
+
+  const url = `${META_API_BASE}/oauth/access_token?${params.toString()}`
+  let response = await fetch(url, { method: 'GET' })
+
+  if (!response.ok) {
+    // If the exchange failed with subcode 36008 ("redirect_uri is identical...")
+    // and no redirectUri was explicitly provided, retry once with redirect_uri: ''
+    // which Meta requires in some Graph API versions when code originates from FB.login.
+    if (!redirectUri) {
+      try {
+        const cloned = response.clone()
+        const errJson = (await cloned.json()) as { error?: { error_subcode?: number } }
+        if (errJson?.error?.error_subcode === 36008) {
+          const retryParams = new URLSearchParams({
+            client_id: appId,
+            client_secret: primarySecret,
+            code,
+            redirect_uri: '',
+          })
+          const retryUrl = `${META_API_BASE}/oauth/access_token?${retryParams.toString()}`
+          const retryResponse = await fetch(retryUrl, { method: 'GET' })
+          if (retryResponse.ok) {
+            response = retryResponse
+          }
+        }
+      } catch {
+        // Fall through to throw original error
+      }
+    }
+
+    if (!response.ok) {
+      await throwMetaError(response, `OAuth code exchange failed: ${response.status}`)
+    }
+  }
+
+  const data = (await response.json()) as {
+    access_token?: string
+    token_type?: string
+    error?: { message?: string }
+  }
+
+  if (!data.access_token) {
+    throw new MetaApiError(
+      data.error?.message ?? 'OAuth code exchange returned no access_token',
+      { httpStatus: 400 },
+    )
+  }
+
+  return {
+    accessToken: data.access_token,
+    tokenType: data.token_type ?? 'bearer',
+  }
+}
+
+// ============================================================
+// Coexistence phone-number details
+// ============================================================
+
+export interface GetCoexistencePhoneDetailsArgs {
+  phoneNumberId: string
+  accessToken: string
+}
+
+/**
+ * Fetch the coexistence-relevant fields from the phone number node.
+ *
+ * Returns all standard MetaPhoneInfo fields PLUS:
+ *   - is_on_biz_app   : true when Meta confirmed coexistence is active
+ *   - platform_type   : Meta's internal platform label (CLOUD_API / SMB / …)
+ *
+ * This replaces a plain verifyPhoneNumber() call after coexistence
+ * onboarding so we capture the coexistence state in the DB row.
+ */
+export async function getCoexistencePhoneDetails(
+  args: GetCoexistencePhoneDetailsArgs,
+): Promise<MetaPhoneInfo> {
+  const { phoneNumberId, accessToken } = args
+  const url =
+    `${META_API_BASE}/${phoneNumberId}` +
+    `?fields=id,display_phone_number,verified_name,quality_rating,is_on_biz_app,platform_type`
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  })
+  if (!response.ok) {
+    await throwMetaError(response, `Meta API error: ${response.status}`)
+  }
+  return response.json() as Promise<MetaPhoneInfo>
 }

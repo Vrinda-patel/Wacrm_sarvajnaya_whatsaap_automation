@@ -44,6 +44,8 @@ const h = vi.hoisted(() => ({
   },
 }))
 
+vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 200 })))
+
 vi.mock('next/server', () => ({
   after: (cb: () => Promise<void> | void) => {
     h.state.afterCallbacks.push(cb)

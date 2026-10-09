@@ -317,6 +317,27 @@ export interface WhatsAppConfig {
    * inbound attachments expire. Migration 039.
    */
   mirror_inbound_media?: boolean;
+  // ---- Coexistence fields (migration 043) ----
+  /** Meta Business Portfolio ID (set after Embedded Signup). */
+  business_id?: string;
+  /** Human-readable E.164 number (e.g. "+91 98765 43210"). */
+  display_phone_number?: string;
+  /**
+   * How this config was created.
+   *   'manual'                       – token + IDs pasted in the form
+   *   'embedded_signup_coexistence'  – Meta Embedded Signup, coexistence mode
+   *   'embedded_signup_standard'     – Meta Embedded Signup, standard mode
+   */
+  onboarding_mode?: 'manual' | 'embedded_signup_coexistence' | 'embedded_signup_standard';
+  /** Lifecycle state of the onboarding flow. */
+  onboarding_status?: 'pending' | 'completed' | 'failed' | 'cancelled';
+  /**
+   * True when Meta confirmed this number is running in coexistence mode
+   * (Cloud API + WhatsApp Business App simultaneously).
+   */
+  is_on_biz_app?: boolean;
+  /** Meta platform classification (e.g. "CLOUD_API", "SMB"). */
+  platform_type?: string;
 }
 
 // Raw Meta status enum. We persist this verbatim from Meta (sync + webhook)

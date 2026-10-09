@@ -22,6 +22,16 @@ import {
   handleTemplateWebhookChange,
   isTemplateWebhookField,
 } from '@/lib/whatsapp/template-webhook'
+import {
+  isCoexistenceField,
+  handleSmbMessageEchoes,
+  handleSmbAppStateSync,
+  handleAccountUpdate,
+  handleHistory,
+  type SmbMessageEcho,
+  type AccountUpdateValue,
+  type SmbAppStateSyncValue,
+} from '@/lib/whatsapp/coexistence-webhook'
 
 // The `after()` callback in POST runs within this route's max duration.
 // Inbound processing can fan out to per-media Meta verification calls, so
@@ -285,6 +295,32 @@ async function processWebhook(body: { entry?: WhatsAppWebhookEntry[] }) {
           },
           supabaseAdmin(),
         )
+        continue
+      }
+
+      // ---- Coexistence events ---------------------------------------------------
+      // Handled BEFORE the messaging branch so we never try to read
+      // message-shaped fields off these different-shape payloads.
+      if (isCoexistenceField(change.field)) {
+        const coValue = change.value as Record<string, unknown>
+        switch (change.field) {
+          case 'smb_message_echoes': {
+            // value.messages contains the echoed outbound messages.
+            const echoes = (coValue.messages ?? []) as SmbMessageEcho[]
+            const phoneNumberId = (coValue.metadata as { phone_number_id?: string })?.phone_number_id ?? ''
+            await handleSmbMessageEchoes(echoes, phoneNumberId, supabaseAdmin())
+            break
+          }
+          case 'smb_app_state_sync':
+            handleSmbAppStateSync(coValue as SmbAppStateSyncValue)
+            break
+          case 'account_update':
+            await handleAccountUpdate(coValue as AccountUpdateValue, supabaseAdmin())
+            break
+          case 'history':
+            handleHistory(coValue)
+            break
+        }
         continue
       }
 

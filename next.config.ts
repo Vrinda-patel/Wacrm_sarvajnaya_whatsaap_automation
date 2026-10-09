@@ -42,7 +42,8 @@ const SECURITY_HEADERS = [
       // Next.js needs 'unsafe-inline' for its inline hydration script
       // and 'unsafe-eval' in dev + some production optimisations.
       // Nonce-based CSP is a later project.
-      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+      // connect.facebook.net is the Meta JS SDK (Embedded Signup button).
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://connect.facebook.net",
       // Tailwind + inline style attributes on lots of components.
       "style-src 'self' 'unsafe-inline'",
       // Supabase public-bucket avatars, contact avatars (arbitrary
@@ -55,7 +56,11 @@ const SECURITY_HEADERS = [
       "font-src 'self' data:",
       // Supabase REST + realtime (WSS). All Meta API calls happen
       // server-side, so graph.facebook.com does not belong here.
-      "connect-src 'self' https://*.supabase.co wss://*.supabase.co",
+      // connect.facebook.net is required for the Meta SDK's own XHR calls.
+      "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://connect.facebook.net https://*.facebook.com",
+      // The Meta Embedded Signup flow renders inside an iframe served from
+      // www.facebook.com or web.facebook.com. Without frame-src it is blocked by the browser.
+      "frame-src https://www.facebook.com https://web.facebook.com",
       "frame-ancestors 'none'",
       "base-uri 'self'",
       "form-action 'self'",
@@ -68,6 +73,15 @@ const nextConfig: NextConfig = {
   // Docker image can run without node_modules or the Next CLI.
   // Harmless outside Docker: `next start` keeps working as before.
   output: "standalone",
+
+  env: {
+    NEXT_PUBLIC_META_APP_ID:
+      process.env.NEXT_PUBLIC_META_APP_ID || process.env.META_APP_ID || "",
+    NEXT_PUBLIC_META_CONFIGURATION_ID:
+      process.env.NEXT_PUBLIC_META_CONFIGURATION_ID ||
+      process.env.META_CONFIGURATION_ID ||
+      "",
+  },
 
   /**
    * Cross-origin dev access (Next.js 16).
